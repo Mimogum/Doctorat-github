@@ -222,6 +222,7 @@ def archetypal_analysis(
     X,
     Z_initial,
     max_iter=100,
+    max_inner_iter=100,
     tol=1e-6
 ):
     """
@@ -280,10 +281,7 @@ def archetypal_analysis(
         )
 
         # Check convergence
-        if (
-            improvement >= 0
-            and improvement < tol
-        ):
+        if (improvement < tol):
             Z = Z_new
             break
 
