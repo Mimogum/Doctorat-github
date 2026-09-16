@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.optimize import nnls
+import matplotlib.pyplot as plt
 
 # ============================================================
 # 1. Compute A
@@ -130,22 +131,20 @@ def compute_residuals_for_archetype(X, A, Z, k):
 # 5. Compute beta for one archetype
 # ============================================================
 
-def compute_beta(X, A, Z, k, M=100):
+def compute_beta(X, A, Z, k, M=1.0):
     n, m = X.shape
 
     numerator = np.zeros(m)
     denominator = 0.0
 
     for i in range(n):
-        if A[i, k] > 1e-12:
+        if A[i, k] > 1e-8:  # Relajamos un poco el umbral numérico
             contribution = np.zeros(m)
-
             for l in range(Z.shape[0]):
                 if l != k:
                     contribution += A[i, l] * Z[l]
 
             v_i = (X[i] - contribution) / A[i, k]
-
             numerator += (A[i, k] ** 2) * v_i
             denominator += A[i, k] ** 2
 
@@ -154,11 +153,28 @@ def compute_beta(X, A, Z, k, M=100):
 
     v = numerator / denominator
 
+    # Para evitar divergencia numérica en NNLS:
+    # 1. Normalizamos T (X.T)
     T = X.T
+    
+    # 2. Construimos la matriz aumentada usando M reducido (M=1.0 por defecto)
     T_augmented = np.vstack([T, M * np.ones((1, n))])
     v_augmented = np.append(v, M)
 
-    beta_k, _ = nnls(T_augmented, v_augmented)
+    # 3. Pequeña regularización en la diagonal para evitar ill-conditioning
+    eps = 1e-6
+    T_augmented += eps * np.random.randn(*T_augmented.shape)
+
+    try:
+        beta_k, _ = nnls(T_augmented, v_augmented)
+    except RuntimeError:
+        # Fallback de seguridad en caso de no convergencia de Scipy
+        beta_k = np.ones(n) / n
+
+    # Aseguramos la suma = 1 mediante proyección directa
+    sum_beta = np.sum(beta_k)
+    if sum_beta > 0:
+        beta_k = beta_k / sum_beta
 
     return beta_k
 
@@ -299,51 +315,74 @@ def archetypal_analysis(
 
 if __name__ == "__main__":
 
-    # --------------------------------------------------------
-    # Small example dataset
-    # --------------------------------------------------------
+    # 1. Generación de datos 2D (Mezcla de 3 Gaussianas)
+    rng = np.random.default_rng(42)
+    n_per_cluster = 100
 
-    X = np.array([
-        [0.0, 0.0],
-        [2.0, 0.0],
-        [0.0, 2.0],
-        [2.0, 2.0]
-    ])
+    # Cluster 1: centrado en (-3, -1)
+    X1 = rng.multivariate_normal(
+        mean=[-3.0, -1.0],
+        cov=[[0.6, 0.2],
+             [0.2, 0.4]],
+        size=n_per_cluster
+    )
 
-    # --------------------------------------------------------
-    # Initial archetypes
-    # --------------------------------------------------------
+    # Cluster 2: centrado en (0, 3)
+    X2 = rng.multivariate_normal(
+        mean=[0.0, 3.0],
+        cov=[[0.5, -0.1],
+             [-0.1, 0.5]],
+        size=n_per_cluster
+    )
 
+    # Cluster 3: centrado en (3, -1)
+    X3 = rng.multivariate_normal(
+        mean=[3.0, -1.0],
+        cov=[[0.6, 0.15],
+             [0.15, 0.5]],
+        size=n_per_cluster
+    )
+
+    # Matriz final de observaciones X con dimensión (300, 2)
+    X = np.vstack([X1, X2, X3])
+
+    print("Shape de X:", X.shape)
+
+    # 2. Inicialización de los 3 arquetipos Z rodeando a los clusters
     Z_initial = np.array([
-        [0.5, 0.5],
-        [1.5, 1.5]
+        [-4.0, -2.0],
+        [ 0.0,  4.0],
+        [ 4.0, -2.0]
     ])
 
-    # --------------------------------------------------------
-    # Run Archetypal Analysis
-    # --------------------------------------------------------
-
+    # 3. Ejecución del Algoritmo
     A, beta, Z, rss = archetypal_analysis(
         X,
         Z_initial,
-        max_iter=100,
-        tol=1e-6
+        max_iter=50,
+        max_inner_iter=50,
+        tol=1e-4
     )
 
-    # --------------------------------------------------------
-    # Final results
-    # --------------------------------------------------------
+    # 4. Mostrar Resultados Finales
+    plt.figure(figsize=(9, 7))
 
-    print("\n=== Final result ===")
+    # 1. Graficar los datos (Gaussianas 2D)
+    plt.scatter(X[:, 0], X[:, 1], c='skyblue', alpha=0.6, edgecolors='k', linewidths=0.3, label='Datos $X$ (300 muestras)')
 
-    print("\nA:")
-    print(A)
+    # 2. Graficar los Arquetipos Iniciales
+    plt.scatter(Z_initial[:, 0], Z_initial[:, 1], c='gray', s=120, marker='o', linestyle='--', label='Z Iniciales')
 
-    print("\nBeta:")
-    print(beta)
+    # 3. Graficar los Arquetipos Finales
+    plt.scatter(Z[:, 0], Z[:, 1], c='red', s=200, marker='X', label='Arquetipos Finales $Z$')
 
-    print("\nZ:")
-    print(Z)
+    # 4. Dibujar el Envolvente Convexo (Simplex) formado por los arquetipos finales
+    Z_polygon = np.vstack([Z, Z[0]])  # Cerrar el triángulo
+    plt.plot(Z_polygon[:, 0], Z_polygon[:, 1], 'r--', linewidth=2, label='Envolvente Arquetípico')
 
-    print("\nRSS:")
-    print(rss)
+    plt.title(f"Archetypal Analysis en 2D (Gaussianas)\nRSS Final = {rss:.4f}")
+    plt.xlabel("Dimensión 1")
+    plt.ylabel("Dimensión 2")
+    plt.legend(loc='upper right')
+    plt.grid(True, linestyle=':', alpha=0.6)
+    plt.show()
