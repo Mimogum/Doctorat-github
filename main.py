@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.optimize import nnls
+from scipy.optimize import nnls, minimize
 import matplotlib.pyplot as plt
 
 # ============================================================
@@ -39,7 +39,7 @@ def compute_A(X, Z):
 # 2. Convex Least Squares
 # ============================================================
 
-def convex_least_squares(x, Z, M=1000):
+def convex_least_squares(x, Z):
     """
     Solve the convex least-squares problem:
 
@@ -49,89 +49,59 @@ def convex_least_squares(x, Z, M=1000):
 
         a >= 0
         sum(a) = 1
-
-    Parameters
-    ----------
-    x : ndarray, shape (m,)
-        Observation.
-
-    Z : ndarray, shape (p, m)
-        Archetypes.
-
-    M : float
-        Penalty used to enforce sum(a) = 1.
-
-    Returns
-    -------
-    a : ndarray, shape (p,)
-        Convex coefficients.
-
-    residual : float
-        NNLS residual.
     """
 
-    # Z has shape (p, m)
-    # We need a matrix with shape (m, p)
+    p = Z.shape[0]    
     T = Z.T
 
-    # Artificial observation to enforce sum(a) = 1
-    T_augmented = np.vstack([
-        T,
-        M * np.ones((1, Z.shape[0]))
-    ])
+    def objective(a):
+        diff = x - T @ a
+        return np.dot(diff, diff)
 
-    x_augmented = np.append(x, M)
+    def jacobian(a):
+        return -2 * T.T @ (x - T @ a)
 
-    # Non-negative least squares
-    a, residual = nnls(T_augmented, x_augmented)
+    constraints = {'type': 'eq', 'fun': lambda a: np.sum(a) - 1.0}
+    bounds = [(0, None) for _ in range(p)]
+    a0 = np.full(p, 1.0 / p)
 
-    return a, residual
+    res = minimize(
+        objective,
+        a0,
+        method='SLSQP',
+        jac=jacobian,
+        bounds=bounds,
+        constraints=constraints,
+        options={'ftol': 1e-9, 'maxiter': 500}
+    )
+
+    a = np.maximum(0, res.x)
+    a_sum = a.sum()
+    if a_sum > 0:
+        a /= a_sum
+    else:
+        a = a0
+
+    return a, res.fun
 
 # ============================================================
 # 3. Compute Z
 # ============================================================
 
-def compute_Z(beta, X):
+def compute_Z(B, X):
     """
     Compute the archetypes from beta and X.
 
-        Z = beta @ X
+        Z = B @ X
     """
 
-    return beta @ X
-
-# ============================================================
-# 4. Residuals for updating one archetype
-# ============================================================
-
-def compute_residuals_for_archetype(X, A, Z, k):
-    """
-    Compute the residuals used to update archetype k.
-
-        r_i = x_i - sum_{l != k} a_il z_l
-    """
-
-    n = X.shape[0]
-    residuals = np.zeros_like(X)
-
-    for i in range(n):
-
-        contribution = np.zeros(X.shape[1])
-
-        for l in range(Z.shape[0]):
-
-            if l != k:
-                contribution += A[i, l] * Z[l]
-
-        residuals[i] = X[i] - contribution
-
-    return residuals
+    return B @ X
 
 # ============================================================
 # 5. Compute beta for one archetype
 # ============================================================
 
-def compute_beta(X, A, Z, k, M=1.0):
+def compute_B(X, A, Z, k, M=1.0):
     n, m = X.shape
 
     numerator = np.zeros(m)
@@ -149,7 +119,7 @@ def compute_beta(X, A, Z, k, M=1.0):
             denominator += A[i, k] ** 2
 
     if denominator == 0:
-        return np.zeros(n)
+        return np.ones(n) / n
 
     v = numerator / denominator
 
@@ -161,22 +131,17 @@ def compute_beta(X, A, Z, k, M=1.0):
     T_augmented = np.vstack([T, M * np.ones((1, n))])
     v_augmented = np.append(v, M)
 
-    # 3. Pequeña regularización en la diagonal para evitar ill-conditioning
-    eps = 1e-6
-    T_augmented += eps * np.random.randn(*T_augmented.shape)
-
     try:
-        beta_k, _ = nnls(T_augmented, v_augmented)
+        B_k, _ = nnls(T_augmented, v_augmented, maxiter=5000)
     except RuntimeError:
-        # Fallback de seguridad en caso de no convergencia de Scipy
-        beta_k = np.ones(n) / n
+        B_k = np.ones(n) / n
 
     # Aseguramos la suma = 1 mediante proyección directa
-    sum_beta = np.sum(beta_k)
-    if sum_beta > 0:
-        beta_k = beta_k / sum_beta
+    sum_B = np.sum(B_k)
+    if sum_B > 0:
+        B_k = B_k / sum_B
 
-    return beta_k
+    return B_k
 
 # ============================================================
 # 6. Compute RSS
@@ -204,7 +169,7 @@ def compute_rss(X, A, Z):
 def one_iteration(X, Z, tol=1e-6, max_inner_iter=100):
     A = compute_A(X, Z)
     p = Z.shape[0]
-    beta = np.zeros((p, X.shape[0]))
+    B = np.zeros((p, X.shape[0]))
 
     Z_new = Z.copy()
 
@@ -212,8 +177,8 @@ def one_iteration(X, Z, tol=1e-6, max_inner_iter=100):
 
     for inner_iteration in range(max_inner_iter):
         for k in range(p):
-            beta[k] = compute_beta(X, A, Z_new, k)
-            Z_new[k] = compute_Z(beta[k:k+1], X)[0]
+            B[k] = compute_B(X, A, Z_new, k)
+            Z_new[k] = compute_Z(B[k:k+1], X)[0]
 
         rss = compute_rss(X, A, Z_new)
 
@@ -227,7 +192,7 @@ def one_iteration(X, Z, tol=1e-6, max_inner_iter=100):
     A_new = compute_A(X, Z_new)
     rss = compute_rss(X, A_new, Z_new)
 
-    return A_new, beta, Z_new, rss
+    return A_new, B, Z_new, rss
 
 
 # ============================================================
@@ -236,55 +201,29 @@ def one_iteration(X, Z, tol=1e-6, max_inner_iter=100):
 
 def archetypal_analysis(
     X,
-    Z_initial,
-    max_iter=100,
-    max_inner_iter=100,
-    tol=1e-6
+    p,
+    max_iter,
+    max_inner_iter,
+    tol
 ):
-    """
-    Run the alternating Archetypal Analysis algorithm.
+    rng = np.random.default_rng(42)
+    n = X.shape[0]
+   
+    B = rng.dirichlet(np.ones(n), size=p)
 
-    Parameters
-    ----------
-    X : ndarray
-        Data matrix.
-
-    Z_initial : ndarray
-        Initial archetypes.
-
-    max_iter : int
-        Maximum number of iterations.
-
-    tol : float
-        Convergence tolerance.
-
-    Returns
-    -------
-    A : ndarray
-        Final coefficients.
-
-    beta : ndarray
-        Final archetype coefficients.
-
-    Z : ndarray
-        Final archetypes.
-
-    rss : float
-        Final reconstruction error.
-    """
-
-    # Copy the initial archetypes so that the original
-    # array is not modified.
-    Z = Z_initial.copy()
+    Z = compute_Z(B, X)
+    Z_initial = Z.copy()
 
     previous_rss = np.inf
 
     for iteration in range(max_iter):
 
         # Perform one alternating iteration
-        A, beta, Z_new, rss = one_iteration(
+        A, B, Z_new, rss = one_iteration(
             X,
-            Z, tol
+            Z,
+            tol = tol,
+            max_inner_iter=max_inner_iter
         )
 
         # Improvement in RSS
@@ -306,7 +245,7 @@ def archetypal_analysis(
 
         previous_rss = rss
 
-    return A, beta, Z, rss
+    return A, B, Z, Z_initial, rss
 
 
 # ============================================================
@@ -345,42 +284,23 @@ if __name__ == "__main__":
 
     # Matriz final de observaciones X con dimensión (300, 2)
     X = np.vstack([X1, X2, X3])
-
     print("Shape de X:", X.shape)
 
-    # 2. Inicialización de los 3 arquetipos Z rodeando a los clusters
-    Z_initial = np.array([
-        [-4.0, -2.0],
-        [ 0.0,  4.0],
-        [ 4.0, -2.0]
-    ])
+    p_archetypes = 3
+    A, B, Z, Z_initial, rss = archetypal_analysis(X, p=p_archetypes, max_iter=100, max_inner_iter=100, tol=1e-4)
 
-    # 3. Ejecución del Algoritmo
-    A, beta, Z, rss = archetypal_analysis(
-        X,
-        Z_initial,
-        max_iter=50,
-        max_inner_iter=50,
-        tol=1e-4
-    )
-
-    # 4. Mostrar Resultados Finales
+    # 3. Mostrar Resultados Finales
     plt.figure(figsize=(9, 7))
 
-    # 1. Graficar los datos (Gaussianas 2D)
     plt.scatter(X[:, 0], X[:, 1], c='skyblue', alpha=0.6, edgecolors='k', linewidths=0.3, label='Datos $X$ (300 muestras)')
-
-    # 2. Graficar los Arquetipos Iniciales
-    plt.scatter(Z_initial[:, 0], Z_initial[:, 1], c='gray', s=120, marker='o', linestyle='--', label='Z Iniciales')
-
-    # 3. Graficar los Arquetipos Finales
+    plt.scatter(Z_initial[:, 0], Z_initial[:, 1], c='gray', s=120, marker='o', label='Z Iniciales (Aleatorios)')
     plt.scatter(Z[:, 0], Z[:, 1], c='red', s=200, marker='X', label='Arquetipos Finales $Z$')
 
-    # 4. Dibujar el Envolvente Convexo (Simplex) formado por los arquetipos finales
-    Z_polygon = np.vstack([Z, Z[0]])  # Cerrar el triángulo
+    # Envolvente convexo
+    Z_polygon = np.vstack([Z, Z[0]])
     plt.plot(Z_polygon[:, 0], Z_polygon[:, 1], 'r--', linewidth=2, label='Envolvente Arquetípico')
 
-    plt.title(f"Archetypal Analysis en 2D (Gaussianas)\nRSS Final = {rss:.4f}")
+    plt.title(f"Archetypal Analysis en 2D\nRSS Final = {rss:.4f}")
     plt.xlabel("Dimensión 1")
     plt.ylabel("Dimensión 2")
     plt.legend(loc='upper right')
