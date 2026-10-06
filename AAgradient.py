@@ -17,17 +17,17 @@ import matplotlib.pyplot as plt
 #
 # Por tanto, en nuestra convención:
 #
-#   C : (N, D)       -> coeficientes que definen los arquetipos
-#   S : (D, N)       -> coeficientes que representan las observaciones
+#   C : (D, N)       -> coeficientes que definen los arquetipos
+#   S : (N, D)       -> coeficientes que representan las observaciones
 #
 # Los arquetipos son:
 #
-#   Z = C.T @ X      -> (D, M)
+#   Z = C @ X      -> (D, M)
 #
 # y la reconstrucción es:
 #
-#   X_hat = S.T @ Z
-#         = S.T @ C.T @ X
+#   X_hat = S @ Z
+#         = S @ C @ X -> (N, M)
 #
 # que es exactamente la transpuesta de:
 #
@@ -112,19 +112,28 @@ def furthest_sum(X, D, rng=None):
 # 2. NORMALIZACIÓN
 # ============================================================
 
-def normalize_columns(A, eps=1e-15):
+def normalize_rows(A):
     """
-    Normaliza cada columna para que sume 1.
+    Normaliza cada fila de A para que sume 1.
 
-    Además impone no negatividad.
+    Parámetros
+    ----------
+    A : np.ndarray
+        Matriz de pesos.
+
+    Returns
+    -------
+    np.ndarray
+        Matriz con cada fila normalizada.
     """
+    A = np.asarray(A, dtype=float)
 
-    A = np.maximum(A, 0.0)
+    row_sums = A.sum(axis=1, keepdims=True)
 
-    sums = A.sum(axis=0, keepdims=True)
-    sums = np.maximum(sums, eps)
+    # Evitar divisiones por cero
+    row_sums[row_sums == 0] = 1.0
 
-    return A / sums
+    return A / row_sums
 
 
 # Función objetivo y gradientes para la actualización de C y S
@@ -143,7 +152,7 @@ def aa_objective(X, C, S):
         ||X - S.T C.T X||_F^2
     """
 
-    X_hat = S.T @ C.T @ X
+    X_hat = S @ C @ X
     residual = X - X_hat
 
     return np.sum(residual ** 2)
@@ -160,8 +169,8 @@ def gradient_S(XTX, C, S):
     El artículo, usando observaciones como columnas, da:
 
         G_S =
-            C.T X.T X C S
-            - C.T X.T X
+            S C X X.T C.T
+            - X X.T C.T 
 
     donde aquí:
 
@@ -177,19 +186,14 @@ def gradient_S(XTX, C, S):
 
     """
 
-    # C.T X.T X C
-    CtXC = C.T @ XTX @ C
-
-    # C.T X.T X
-    CtXX = C.T @ XTX
-
     # Gradiente indicado en el artículo
-    G = CtXC @ S - CtXX
+    G = S @ C @ XTX @ C.T 
+    G -= XTX @ C.T
 
     # Corrección de invariancia de normalización
     correction = np.sum(
         G * S,
-        axis=0,
+        axis=1,
         keepdims=True
     )
 
@@ -209,21 +213,19 @@ def gradient_C(XTX, C, S):
     El artículo da:
 
         G_C =
-            X.T X C S S.T
-            - X.T X S.T
+            S.T S C X X.T
+            - S.T X X.T
 
     """
 
     # X.T X C S S.T
-    G = XTX @ C @ S @ S.T
-
-    # - X.T X S.T
-    G -= XTX @ S.T
+    G = S.T @ S @ C @ XTX
+    G -= S.T @ XTX
 
     # Corrección de invariancia de normalización
     correction = np.sum(
         G * C,
-        axis=0,
+        axis=1,
         keepdims=True
     )
 
@@ -259,7 +261,7 @@ def update_S(XTX, C, S, step):
     S_new = np.maximum(S_new, 0.0)
 
     # Normalización para imponer sum_d S[d,n] = 1
-    S_new = normalize_columns(S_new)
+    S_new = normalize_rows(S_new)
 
     return S_new
 
@@ -281,7 +283,7 @@ def update_C(XTX, C, S, step):
     C_new = np.maximum(C_new, 0.0)
 
     # sum_n C[n,d] = 1
-    C_new = normalize_columns(C_new)
+    C_new = normalize_rows(C_new)
 
     return C_new
 
@@ -402,10 +404,10 @@ def initialize_C(X, D, rng):
 
     N = X.shape[0]
 
-    C = np.zeros((N, D), dtype=float)
+    C = np.zeros((D, N), dtype=float)
 
     for d, index in enumerate(selected):
-        C[index, d] = 1.0
+        C[d, index] = 1.0
 
     return C, selected
 
@@ -414,14 +416,14 @@ def initialize_C(X, D, rng):
 # 11. INICIALIZACIÓN DE S
 # ============================================================
 
-def initialize_S(D, N, rng):
+def initialize_S(N, D, rng):
     """
     Inicialización aleatoria de S y normalización por columnas.
     """
 
-    S = rng.random((D, N))
+    S = rng.random((N, D))
 
-    return normalize_columns(S)
+    return normalize_rows(S)
 
 
 # ============================================================
@@ -432,12 +434,12 @@ def compute_archetypes(X, C):
     """
     Calcula los arquetipos:
 
-        Z = C.T @ X
+        Z = C @ X
 
     Z tiene forma (D, M).
     """
 
-    return C.T @ X
+    return C @ X
 
 
 # ============================================================
@@ -470,8 +472,8 @@ def check_gradients(
     # 2 * gradiente. La corrección de normalización NO forma
     # parte de la derivada euclídea simple; por ello para esta
     # prueba comprobamos primero el gradiente base.
-    Gs_base = C.T @ XTX @ C @ S - C.T @ XTX
-    Gc_base = XTX @ C @ S @ S.T - XTX @ S.T
+    Gs_base = S @ C @ XTX @ C.T - XTX @ C.T
+    Gc_base = S.T @ S @ C @ XTX - S.T @ XTX
 
     # ---- S ----
     i_s, j_s = 0, 0
@@ -651,8 +653,8 @@ def archetypal_analysis(
     # --------------------------------------------------------
 
     S = initialize_S(
-        p,
         N,
+        p,
         rng
     )
 
@@ -679,7 +681,7 @@ def archetypal_analysis(
 
     if verbose:
         print("=" * 70)
-        print("ARCHETYPAL ANALYSIS - PROJECTED GRADIENT")
+        print("ARCHETYPAL ANALYSIS - PROJECTED GRADIENT - SCX")
         print("=" * 70)
         print(f"N observaciones : {N}")
         print(f"M variables     : {M}")
@@ -759,7 +761,6 @@ def archetypal_analysis(
 
     return C, S, Z, np.asarray(history), selected
 
-
 # ============================================================
 # 15. PRUEBA
 # ============================================================
@@ -790,9 +791,9 @@ if __name__ == "__main__":
     true_S = rng.dirichlet(
         np.ones(3),
         size=n_samples
-    ).T
+    )
 
-    X = true_S.T @ true_Z
+    X = true_S @ true_Z
 
     print("Shape de X:", X.shape)
 
@@ -827,11 +828,15 @@ if __name__ == "__main__":
     print("\nÍndices FURTHESTSUM:")
     print(selected)
 
-    print("\nSuma de columnas de C:")
-    print(C.sum(axis=0))
+    print("\nForma de C:", C.shape)
+    print("Forma de S:", S.shape)
+    print("Forma de Z:", Z.shape)
 
-    print("\nSuma de columnas de S:")
-    print(S.sum(axis=0)[:10], "...")
+    print("\nSuma de filas de C:")
+    print(C.sum(axis=1))
+
+    print("\nSuma de filas de S:")
+    print(S.sum(axis=1)[:10], "...")
 
     print("\nMínimo de C:", C.min())
     print("Mínimo de S:", S.min())
@@ -844,7 +849,7 @@ if __name__ == "__main__":
         np.all(np.diff(history) <= 1e-10)
     )
 
-    reconstruction = S.T @ C.T @ X
+    reconstruction = S @ C @ X
     reconstruction_error = np.sum(
         (X - reconstruction) ** 2
     )
@@ -909,7 +914,7 @@ if __name__ == "__main__":
     )
 
     plt.title(
-        f"Archetypal Analysis - Projected Gradient\n"
+        f"Archetypal Analysis - Projected Gradient - SCX\n"
         f"Loss final = {history[-1]:.6e}"
     )
 
@@ -918,3 +923,326 @@ if __name__ == "__main__":
     plt.legend()
     plt.grid(True, linestyle=":", alpha=0.6)
     plt.show()
+
+
+# ============================================================
+# 15. PRUEBA 2
+# ============================================================
+
+# if __name__ == "__main__":
+
+#     rng = np.random.default_rng(123)
+
+#     # --------------------------------------------------------
+#     # Crear datos sintéticos
+#     #
+#     # Tenemos 4 arquetipos verdaderos:
+#     #
+#     #   z1 = (0, 0)
+#     #   z2 = (2, 0)
+#     #   z3 = (2, 2)
+#     #   z4 = (0, 2)
+#     #
+#     # Los datos X se generan como combinaciones convexas
+#     # de estos cuatro arquetipos.
+#     # --------------------------------------------------------
+
+#     true_Z = np.array([
+#         [0.0, 0.0],
+#         [2.0, 0.0],
+#         [2.0, 2.0],
+#         [0.0, 2.0]
+#     ])
+
+#     n_samples = 300
+#     p = 4
+
+#     # --------------------------------------------------------
+#     # Pesos verdaderos
+#     #
+#     # Cada fila suma 1:
+#     #
+#     #   true_S[i, :] >= 0
+#     #   sum(true_S[i, :]) = 1
+#     #
+#     # --------------------------------------------------------
+
+#     true_S = rng.dirichlet(
+#         np.ones(p),
+#         size=n_samples
+#     )
+
+#     # --------------------------------------------------------
+#     # Generar X
+#     #
+#     # X = true_S @ true_Z
+#     #
+#     # (300,4) @ (4,2) = (300,2)
+#     # --------------------------------------------------------
+
+#     X = true_S @ true_Z
+
+#     print("Shape de X:", X.shape)
+
+#     # --------------------------------------------------------
+#     # Ejecutar Archetypal Analysis
+#     # --------------------------------------------------------
+
+#     C, S, Z, history, selected = archetypal_analysis(
+#         X,
+#         p=p,
+#         max_iter=200,
+#         max_inner_iter=20,
+#         tol=1e-8,
+#         random_state=123,
+#         verbose=True
+#     )
+
+#     # --------------------------------------------------------
+#     # COMPROBACIONES
+#     # --------------------------------------------------------
+
+#     print("\n" + "=" * 70)
+#     print("COMPROBACIONES")
+#     print("=" * 70)
+
+#     # --------------------------------------------------------
+#     # Arquetipos
+#     # --------------------------------------------------------
+
+#     print("\nArquetipos verdaderos:")
+#     print(true_Z)
+
+#     print("\nArquetipos encontrados:")
+#     print(Z)
+
+#     print("\nÍndices FURTHESTSUM:")
+#     print(selected)
+
+#     # --------------------------------------------------------
+#     # Shapes
+#     # --------------------------------------------------------
+
+#     print("\nFormas:")
+#     print("X:", X.shape)
+#     print("C:", C.shape)
+#     print("S:", S.shape)
+#     print("Z:", Z.shape)
+
+#     # Esperamos:
+#     #
+#     # X = (300, 2)
+#     # C = (4, 300)
+#     # S = (300, 4)
+#     # Z = (4, 2)
+
+#     # --------------------------------------------------------
+#     # Restricciones de C
+#     # --------------------------------------------------------
+
+#     print("\nSuma de filas de C:")
+#     print(C.sum(axis=1))
+
+#     print(
+#         "¿Todas las filas de C suman 1?:",
+#         np.allclose(C.sum(axis=1), 1.0)
+#     )
+
+#     # --------------------------------------------------------
+#     # Restricciones de S
+#     # --------------------------------------------------------
+
+#     print("\nPrimeras 10 sumas de filas de S:")
+#     print(S.sum(axis=1)[:10])
+
+#     print(
+#         "¿Todas las filas de S suman 1?:",
+#         np.allclose(S.sum(axis=1), 1.0)
+#     )
+
+#     # --------------------------------------------------------
+#     # No negatividad
+#     # --------------------------------------------------------
+
+#     print("\nMínimo de C:", C.min())
+#     print("Mínimo de S:", S.min())
+
+#     print(
+#         "¿C es no negativa?:",
+#         np.all(C >= -1e-12)
+#     )
+
+#     print(
+#         "¿S es no negativa?:",
+#         np.all(S >= -1e-12)
+#     )
+
+#     # --------------------------------------------------------
+#     # Loss
+#     # --------------------------------------------------------
+
+#     print("\nLoss inicial:", history[0])
+#     print("Loss final:", history[-1])
+
+#     print(
+#         "\n¿La loss es no creciente?:",
+#         np.all(np.diff(history) <= 1e-10)
+#     )
+
+#     # --------------------------------------------------------
+#     # Reconstrucción
+#     #
+#     # X_hat = S @ C @ X
+#     # --------------------------------------------------------
+
+#     reconstruction = S @ C @ X
+
+#     reconstruction_error = np.sum(
+#         (X - reconstruction) ** 2
+#     )
+
+#     print(
+#         "\nError de reconstrucción:",
+#         reconstruction_error
+#     )
+
+#     # --------------------------------------------------------
+#     # Error relativo
+#     # --------------------------------------------------------
+
+#     relative_error = (
+#         np.linalg.norm(X - reconstruction)
+#         / np.linalg.norm(X)
+#     )
+
+#     print(
+#         "Error relativo de reconstrucción:",
+#         relative_error
+#     )
+
+#     # --------------------------------------------------------
+#     # Gradient check
+#     # --------------------------------------------------------
+
+#     print("\n" + "=" * 70)
+#     print("GRADIENT CHECK")
+#     print("=" * 70)
+
+#     check_gradients(
+#         X,
+#         C,
+#         S
+#     )
+
+#     # --------------------------------------------------------
+#     # Plot
+#     # --------------------------------------------------------
+
+#     plt.figure(figsize=(10, 8))
+
+#     # Datos
+#     plt.scatter(
+#         X[:, 0],
+#         X[:, 1],
+#         c="skyblue",
+#         alpha=0.5,
+#         edgecolors="k",
+#         linewidths=0.3,
+#         label="Datos X"
+#     )
+
+#     # Arquetipos encontrados
+#     plt.scatter(
+#         Z[:, 0],
+#         Z[:, 1],
+#         c="red",
+#         s=250,
+#         marker="X",
+#         label="Arquetipos encontrados"
+#     )
+
+#     # Arquetipos verdaderos
+#     plt.scatter(
+#         true_Z[:, 0],
+#         true_Z[:, 1],
+#         c="black",
+#         s=120,
+#         marker="o",
+#         label="Arquetipos verdaderos"
+#     )
+
+#     # Nombres de los arquetipos
+#     for i, point in enumerate(true_Z):
+#         plt.annotate(
+#             f"Z{i+1} real",
+#             point,
+#             xytext=(8, 8),
+#             textcoords="offset points"
+#         )
+
+#     for i, point in enumerate(Z):
+#         plt.annotate(
+#             f"Z{i+1}",
+#             point,
+#             xytext=(8, -15),
+#             textcoords="offset points",
+#             color="red"
+#         )
+
+#     # Polígono de los arquetipos encontrados
+#     #
+#     # Ordenamos aproximadamente los puntos por ángulo
+#     # alrededor de su centro para dibujar la envolvente.
+#     center = Z.mean(axis=0)
+
+#     angles = np.arctan2(
+#         Z[:, 1] - center[1],
+#         Z[:, 0] - center[0]
+#     )
+
+#     order = np.argsort(angles)
+
+#     Z_ordered = Z[order]
+
+#     Z_polygon = np.vstack([
+#         Z_ordered,
+#         Z_ordered[0]
+#     ])
+
+#     plt.plot(
+#         Z_polygon[:, 0],
+#         Z_polygon[:, 1],
+#         "r--",
+#         linewidth=2,
+#         label="Envolvente arquetípica"
+#     )
+
+#     # Polígono verdadero
+#     true_polygon = np.vstack([
+#         true_Z,
+#         true_Z[0]
+#     ])
+
+#     plt.plot(
+#         true_polygon[:, 0],
+#         true_polygon[:, 1],
+#         "k-",
+#         linewidth=2,
+#         alpha=0.7,
+#         label="Envolvente verdadera"
+#     )
+
+#     plt.title(
+#         f"Archetypal Analysis - Projected Gradient - SCX\n"
+#         f"Loss final = {history[-1]:.6e}"
+#     )
+
+#     plt.xlabel("Dimensión 1")
+#     plt.ylabel("Dimensión 2")
+
+#     plt.legend()
+#     plt.grid(True, linestyle=":", alpha=0.6)
+
+#     plt.axis("equal")
+
+#     plt.show()
